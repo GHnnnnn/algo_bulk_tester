@@ -1,13 +1,29 @@
-
 import os
 import pandas as pd
 from datetime import datetime, timedelta
 import time
 import re
 from multiprocessing import Pool 
+import signal
+import sys
 
 # Global variable
 data = None
+pool = None
+
+def signal_handler(signal, frame):
+    global pool
+    print("Keyboard shortcut received. Exporting data and stopping script...")
+    if pool:
+        pool.terminate()
+        pool.join()
+    # Export the results if available
+    if 'results_df' in globals():
+        results_df.to_csv(export_filename, index=False)
+        print(f"Results exported to {export_filename}")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
 
 def increment_version(version):
     major, minor = map(int, version.split('.'))
@@ -41,7 +57,10 @@ def simulate_strategy_vectorized(df, fast, slow, signal, time_interval, script_v
 
     total_profit_loss = final_capital - initial_capital
     num_trades = df['Buy_Signal'].sum() + df['Sell_Signal'].sum()
-    days_of_backtest = (df.index.max() - df.index.min()).days
+
+    start_date = df.index.min()
+    end_date = df.index.max()
+    days_of_backtest = (end_date - start_date).days
 
     results = {
         'interval': f'{time_interval}min',
@@ -69,10 +88,10 @@ def simulate_strategy_vectorized(df, fast, slow, signal, time_interval, script_v
 
     return results, trades
 
-def export_trades(trades, index_number, symbol, strategy_name, current_date):
+def export_trades(trades, index_number, symbol, strategy_name, current_date, macd_parameters):
     trades_filename = os.path.join(
         'strategy_data',
-        f'trades_{symbol}_{strategy_name}_{current_date}_ind{index_number}.csv'
+        f'trades_{symbol}_{strategy_name}_{macd_parameters}_{current_date}_ind{index_number}.csv'   
     )
     trades.to_csv(trades_filename, index=False)
     print(f"Trades list exported to {trades_filename}")
@@ -84,10 +103,10 @@ def run_simulation(params):
     df = macd(df, fast=fast, slow=slow, signal=signal)
     result, trades = simulate_strategy_vectorized(df, fast, slow, signal, time_interval, script_version)
     result['index_number'] = index_number
+    macd_parameters = f"{fast}_{slow}_{signal}"
 
-    # Use total_params instead of macd_params_with_index
     if index_number == 0 or index_number == total_params // 2 or index_number == total_params - 1:
-        export_trades(trades, index_number, symbol, strategy_name, current_date)
+        export_trades(trades, index_number, symbol, strategy_name, current_date, macd_parameters)
 
     return result
 
@@ -125,11 +144,14 @@ def initialize_worker(data_args):
 if __name__ == '__main__':
     global symbol, strategy_name, current_date
 
-    script_version = "2.07"
-
-    avg_time_lapse_input = input("Enter the average time lapse in seconds for each strategy calculation (default 2.000): ").strip()
+    script_version = "2.09"
+    print("")
+    print("     Confirm average time per iteration per each backtest day")   
+    print("     For testing stocks aprox. 0.017 seconds")
+    print("     For testing cryptocurrencies aprox. 0.060 seconds")
+    avg_time_lapse_input = input("     (default 0.017): ").strip()
     if avg_time_lapse_input == '':
-        avg_time_lapse = 2.000
+        avg_time_lapse = 0.017
     else:
         avg_time_lapse = float(avg_time_lapse_input)
 
@@ -141,7 +163,7 @@ if __name__ == '__main__':
     for i, symbol_name in enumerate(available_symbols):
         print(f"{i+1}. {symbol_name}")
 
-    symbol_choice = int(input("\nSelect a symbol by number: ")) - 1
+    symbol_choice = int(input("\nSelect a symbol by number (default 1): ") or 1) - 1
     filename = available_files[symbol_choice]
 
     match = re.match(r'^(.*?)_(.*?)[,_ ]+(\d+)(?:\.csv)$', filename)
@@ -152,16 +174,17 @@ if __name__ == '__main__':
     else:
         raise ValueError(f"Filename {filename} does not match the expected pattern.")
 
-    crypto_sources = ['BINANCE', 'BITFINEX', 'COINBASE', 'KRAKEN', 'OKX', 'KUCOIN', 'BYBIT', 'CRYPTO']
+    crypto_sources = ['CRYPTO']
     is_crypto = source.upper() in crypto_sources
 
     if not is_crypto:
-        extended_hours_choice = input("Do you want to include extended market hours data? (y/n): ").strip().lower()
+        print("")
+        extended_hours_choice = input("Include extended market data points? (Y/N, default N): ").strip().lower() or 'n'
         include_extended_hours = extended_hours_choice == 'y'
     else:
         include_extended_hours = True
-
-    time_interval_input = input(f"Enter the time interval in minutes to process strategies (default {interval}): ").strip()
+    print("")
+    time_interval_input = input(f"Enter the time interval in min to backtest strategy (default {interval} min): ").strip()
     if time_interval_input == '':
         time_interval = interval
     else:
@@ -179,33 +202,42 @@ if __name__ == '__main__':
 
     # Define MACD Parameter Ranges
     macd_params = [
-        (fast, slow, signal)
-        for fast in range(10, 21, 3)
-        for slow in range(10, 21, 3)
-        for signal in range(10, 21, 3)
+    (fast, slow, signal)
+    for fast in range(10, 21, 3)
+    for slow in range(10, 21, 3)
+    for signal in range(10, 21, 3)
     ]
 
     total_iterations = len(macd_params)
-    estimated_time_seconds = total_iterations * avg_time_lapse
+    days_of_backtest = (end_date - start_date).days
+
+    estimated_time_seconds = total_iterations * avg_time_lapse * days_of_backtest
     estimated_time_minutes = estimated_time_seconds / 60
     estimated_time_hours = estimated_time_minutes / 60
 
     total_params = total_iterations  # Total number of parameter sets
-
     print(f"\nTotal iterations: {total_iterations}")
-    print(f"Backtest time range: {start_date} - {end_date} = x days")
+    print(f"Backtest time range: ({(start_date).day} - {(end_date).day} = {days_of_backtest} days")
     print(f"Estimated time for completion: {estimated_time_hours:.2f} hours ({estimated_time_minutes:.2f} minutes)")
+    print("")
+    print("")
+    print("         NOTE: To stop the running script and save any data left on memory,")
+    print("         use the keyboard shortcut Ctrl + C")
+    print("")
+    print("")
 
-    proceed_choice = input("Do you want to proceed? (y/n): ").strip().lower()
+    proceed_choice = input("Do you want to proceed? (Y/N, default Y): ").strip().lower() or 'y'
     if proceed_choice != 'y':
+        print("")
         print("Script execution aborted.")
+        print("")
         exit()
 
     macd_params_with_index = [
-    (fast, slow, signal, idx, time_interval, script_version, symbol, strategy_name, current_date, total_params)
-    for idx, (fast, slow, signal) in enumerate(macd_params)
+        (fast, slow, signal, idx, time_interval, script_version, symbol, strategy_name, current_date, total_params)
+        for idx, (fast, slow, signal) in enumerate(macd_params)
     ]
-
+    
     export_filename = os.path.join('strategy_data', f'{symbol}_{strategy_name}_{current_date}.csv')
 
     if not os.path.exists('strategy_data'):
@@ -223,10 +255,10 @@ if __name__ == '__main__':
 
     # Execution Time and Version Update
     end_time = time.time()
-    total_time_execution = end_time - start_time
+    total_time_execution = (end_time - start_time)
     hours, rem = divmod(total_time_execution, 3600)
     minutes, seconds = divmod(rem, 60)
-    avg_time_per_iteration = total_time_execution / (total_iterations if total_iterations else 0 * (end_date - start_date))
+    avg_time_per_iteration = total_time_execution / (total_iterations if total_iterations else 0 * days_of_backtest)
 
     print(f"\nTotal iterations: {total_iterations}")
     print(f"Total time elapsed: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}")
