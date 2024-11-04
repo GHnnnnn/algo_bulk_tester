@@ -17,10 +17,14 @@ def signal_handler(signal, frame):
     if pool:
         pool.terminate()
         pool.join()
-    # Export the results if available
-    if 'results_df' in globals():
-        results_df.to_csv(export_filename, index=False)
-        print(f"Results exported to {export_filename}")
+
+    results_df = pd.DataFrame(results)
+    if os.path.exists(export_filename): 
+        existing_df = pd.read_csv(export_filename) 
+        combined_df = pd.concat([existing_df, results_df]) 
+    else: 
+        combined_df = results_df 
+        combined_df.to_csv(export_filename, index=False)
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -97,7 +101,7 @@ def export_trades(trades, index_number, symbol, strategy_name, current_date, mac
     print(f"Trades list exported to {trades_filename}")
 
 def run_simulation(params):
-    (fast, slow, signal, index_number, time_interval, script_version, symbol, strategy_name, current_date, total_params) = params
+    (fast, slow, signal, index_number, time_interval, script_version, symbol, strategy_name, current_date, total_params, export_filename) = params
     global data
     df = data[['close']].copy()
     df = macd(df, fast=fast, slow=slow, signal=signal)
@@ -105,10 +109,30 @@ def run_simulation(params):
     result['index_number'] = index_number
     macd_parameters = f"{fast}_{slow}_{signal}"
 
-    if index_number == 0 or index_number == total_params // 2 or index_number == total_params - 1:
+    # Initialize the results list if it does not exist
+    if 'results' not in globals():
+        global results
+        results = []
+
+    # Append the current result
+    results.append(result)
+
+    # Export results every 1000 tests
+    if index_number % 1000 == 0:
+        results_df = pd.DataFrame(results)
+        if os.path.exists(export_filename):
+            existing_df = pd.read_csv(export_filename)
+            combined_df = pd.concat([existing_df, results_df])
+        else:
+            combined_df = results_df
+        combined_df.to_csv(export_filename, index=False)
+        results = []
+
+    if index_number == 2 or index_number == total_params // 2 or index_number == total_params - 1:
         export_trades(trades, index_number, symbol, strategy_name, current_date, macd_parameters)
 
     return result
+
 
 def initialize_worker(data_args):
     global data
@@ -147,11 +171,11 @@ if __name__ == '__main__':
     script_version = "2.09"
     print("")
     print("     Confirm average time per iteration per each backtest day")   
-    print("     For testing stocks aprox. 0.017 seconds")
-    print("     For testing cryptocurrencies aprox. 0.060 seconds")
-    avg_time_lapse_input = input("     (default 0.017): ").strip()
+    print("     For testing stocks aprox. 0.002 seconds")
+    print("     For testing cryptocurrencies aprox. 0.002 seconds")
+    avg_time_lapse_input = input("     (default 0.002): ").strip()
     if avg_time_lapse_input == '':
-        avg_time_lapse = 0.017
+        avg_time_lapse = 0.002
     else:
         avg_time_lapse = float(avg_time_lapse_input)
 
@@ -194,19 +218,41 @@ if __name__ == '__main__':
     current_date = datetime.now().strftime('%y%m%d')
 
     data_filepath = os.path.join(data_dir, filename)
-    start_date = pd.to_datetime("2024-08-10").tz_localize('UTC')
-    end_date = pd.to_datetime("2024-10-20").tz_localize('UTC')
+    start_date = pd.to_datetime("2024-10-29").tz_localize('UTC')
+    end_date = pd.to_datetime("2024-11-04").tz_localize('UTC')
     min_days_back = max(1, int(round((time_interval * 100) / (60 * 24))))
     required_start_date = start_date - timedelta(days=min_days_back)
     data_args = (data_filepath, is_crypto, include_extended_hours, time_interval, required_start_date, end_date)
 
     # Define MACD Parameter Ranges
+    """
+    # for debugging purposes...
     macd_params = [
     (fast, slow, signal)
     for fast in range(10, 21, 3)
     for slow in range(10, 21, 3)
     for signal in range(10, 21, 3)
     ]
+    """
+    macd_params = []
+
+    # 1 to 100: step = 1
+    macd_params += [(fast, slow, signal)
+                    for fast in range(1, 100)
+                    for slow in range(1, 100)
+                    for signal in range(1, 100)]
+
+    # 101 to 250: step = 5
+    macd_params += [(fast, slow, signal)
+                    for fast in range(101, 250, 5)
+                    for slow in range(101, 250, 5)
+                    for signal in range(101, 250, 5)]
+
+    # 251 to 500: step = 10
+    macd_params += [(fast, slow, signal)
+                    for fast in range(251, 501, 10)
+                    for slow in range(251, 501, 10)
+                    for signal in range(251, 501, 10)]
 
     total_iterations = len(macd_params)
     days_of_backtest = (end_date - start_date).days
@@ -232,13 +278,13 @@ if __name__ == '__main__':
         print("Script execution aborted.")
         print("")
         exit()
-
-    macd_params_with_index = [
-        (fast, slow, signal, idx, time_interval, script_version, symbol, strategy_name, current_date, total_params)
-        for idx, (fast, slow, signal) in enumerate(macd_params)
-    ]
     
     export_filename = os.path.join('strategy_data', f'{symbol}_{strategy_name}_{current_date}.csv')
+
+    macd_params_with_index = [
+        (fast, slow, signal, idx, time_interval, script_version, symbol, strategy_name, current_date, total_params, export_filename)
+        for idx, (fast, slow, signal) in enumerate(macd_params)
+    ]
 
     if not os.path.exists('strategy_data'):
         os.makedirs('strategy_data')
@@ -249,9 +295,14 @@ if __name__ == '__main__':
     with Pool(initializer=initialize_worker, initargs=(data_args,)) as pool:
         results = pool.map(run_simulation, macd_params_with_index)
 
-    # Save Results
+    # Save final results
     results_df = pd.DataFrame(results)
-    results_df.to_csv(export_filename, index=False)
+    if os.path.exists(export_filename):
+        existing_df = pd.read_csv(export_filename)
+        combined_df = pd.concat([existing_df, results_df])
+    else:
+        combined_df = results_df
+    combined_df.to_csv(export_filename, index=False)
 
     # Execution Time and Version Update
     end_time = time.time()
@@ -271,10 +322,7 @@ if __name__ == '__main__':
     # - Data Validation: Add checks for anomalies in the data (e.g., zeros, negative prices).
     # - Use binary formats like Feather or Parquet for faster read/write times.
     # - Ensure Filename Consistency: Verify that all your data files follow a standardized naming convention like SOURCE_SYMBOL_INTERVAL.csv without unexpected spaces or commas.
-    # - Parameter Sensibility: Ensure that 'fast', 'slow', and 'signal' parameters make sense in the context of your data's timeframe.
-    # - The simulation logic has been vectorized to improve performance.
-    # - Batch Processing: Data is pre-processed once before the loop to optimize performance.
-    # - backtest days to count end - start date and not difference in index 
+    # - organise database with prices. for missing values calculate a mean value?
 
     """
     # Example of how to save data using Feather or Parquet:
